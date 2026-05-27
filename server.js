@@ -13,9 +13,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecretkey_changeme_in_prod_2025';
 const PORT = process.env.PORT || 3000;
 
-// ── Database (simple JSON file — no external lowdb dependency issues) ─────────
+// ── Database (simple JSON file) ────────────────────────────────────────────
 const dbFile = path.join(__dirname, 'db.json');
-
 const DEFAULT_DB = () => ({
   users: [],
   messages: [],
@@ -39,37 +38,30 @@ function dbRead() {
     return fresh;
   }
 }
-
 function dbWrite(data) {
-  try {
-    fs.writeFileSync(dbFile, JSON.stringify(data, null, 2), 'utf8');
-  } catch (e) {
-    console.error('DB write error:', e);
-  }
+  try { fs.writeFileSync(dbFile, JSON.stringify(data, null, 2), 'utf8'); }
+  catch (e) { console.error('DB write error:', e); }
 }
 
-// Load on startup
 let db = dbRead();
 
 // ── Express Setup ──────────────────────────────────────────────────────────
 const app = express();
-
-// CORS — allow all origins in dev, tighten in prod via env
 app.use(cors({
   origin: process.env.CORS_ORIGIN || '*',
   methods: ['GET','POST','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
 }));
-
 app.use(express.json());
-
-// ── Error handler that always returns JSON ─────────────────────────────────
 app.use((req, res, next) => {
   res.jsonError = (status, msg) => res.status(status).json({ error: msg });
   next();
 });
 
-// ── Auth Middleware ─────────────────────────────────────────────────────────
+// ── Health check (public, no auth — required for Railway) ─────────────────
+app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
+
+// ── Auth Middleware ────────────────────────────────────────────────────────
 function authMiddleware(req, res, next) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) return res.status(401).json({ error: 'No token' });
@@ -82,7 +74,7 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────
 function sanitizeUser(user) {
   if (!user) return null;
   return {
@@ -96,7 +88,6 @@ function sanitizeUser(user) {
     createdAt: user.createdAt
   };
 }
-
 function hydrateMessages(msgs) {
   return msgs.map(m => {
     const user = db.users.find(u => u.id === m.userId);
@@ -104,7 +95,6 @@ function hydrateMessages(msgs) {
       ...m,
       user: user ? sanitizeUser(user) : { id: m.userId, username: 'deleted', displayName: 'Deleted User', avatar: '', isOwner: false, status: 'offline', bio: '' }
     };
-    // Populate replyToMsg if applicable
     if (m.replyTo) {
       const parent = db.messages.find(p => p.id === m.replyTo);
       if (parent) {
@@ -119,7 +109,7 @@ function hydrateMessages(msgs) {
   });
 }
 
-// ── Auth Routes ─────────────────────────────────────────────────────────────
+// ── Auth Routes ────────────────────────────────────────────────────────────
 app.post('/api/signup', async (req, res) => {
   try {
     const { username, password, displayName } = req.body || {};
@@ -127,12 +117,10 @@ app.post('/api/signup', async (req, res) => {
     if (username.length < 3) return res.status(400).json({ error: 'Username must be at least 3 characters' });
     if (password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
     if (!/^[a-zA-Z0-9_.-]+$/.test(username)) return res.status(400).json({ error: 'Username: letters, numbers, _ . - only' });
-
     db = dbRead();
     if (db.users.find(u => u.username.toLowerCase() === username.toLowerCase())) {
       return res.status(400).json({ error: 'Username already taken' });
     }
-
     const hashedPassword = await bcrypt.hash(password, 10);
     const isOwner = username.toLowerCase() === 'billy';
     const user = {
@@ -146,10 +134,8 @@ app.post('/api/signup', async (req, res) => {
       bio: '',
       createdAt: Date.now()
     };
-
     db.users.push(user);
     dbWrite(db);
-
     const token = jwt.sign({ id: user.id, username: user.username, isOwner: user.isOwner }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, user: sanitizeUser(user) });
   } catch (e) {
@@ -162,17 +148,13 @@ app.post('/api/login', async (req, res) => {
   try {
     const { username, password } = req.body || {};
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-
     db = dbRead();
     const user = db.users.find(u => u.username.toLowerCase() === username.toLowerCase());
     if (!user) return res.status(400).json({ error: 'User not found' });
-
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(400).json({ error: 'Wrong password' });
-
     user.status = 'online';
     dbWrite(db);
-
     const token = jwt.sign({ id: user.id, username: user.username, isOwner: user.isOwner }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, user: sanitizeUser(user) });
   } catch (e) {
@@ -188,12 +170,11 @@ app.get('/api/me', authMiddleware, (req, res) => {
   res.json(sanitizeUser(user));
 });
 
-// ── User Routes ─────────────────────────────────────────────────────────────
+// ── User Routes ────────────────────────────────────────────────────────────
 app.get('/api/users', authMiddleware, (req, res) => {
   db = dbRead();
   res.json(db.users.map(sanitizeUser));
 });
-
 app.patch('/api/users/status', authMiddleware, (req, res) => {
   const { status } = req.body || {};
   const allowed = ['online', 'away', 'dnd', 'offline'];
@@ -205,7 +186,6 @@ app.patch('/api/users/status', authMiddleware, (req, res) => {
   dbWrite(db);
   res.json({ ok: true });
 });
-
 app.patch('/api/users/bio', authMiddleware, (req, res) => {
   const { bio } = req.body || {};
   db = dbRead();
@@ -215,7 +195,6 @@ app.patch('/api/users/bio', authMiddleware, (req, res) => {
   dbWrite(db);
   res.json({ ok: true });
 });
-
 app.patch('/api/users/displayName', authMiddleware, (req, res) => {
   const { displayName } = req.body || {};
   if (!displayName?.trim()) return res.status(400).json({ error: 'Display name required' });
@@ -227,46 +206,38 @@ app.patch('/api/users/displayName', authMiddleware, (req, res) => {
   res.json({ ok: true, displayName: user.displayName });
 });
 
-// ── Room Routes ─────────────────────────────────────────────────────────────
+// ── Room Routes ────────────────────────────────────────────────────────────
 app.get('/api/rooms', authMiddleware, (req, res) => {
   db = dbRead();
   res.json(db.rooms);
 });
-
 app.post('/api/rooms', authMiddleware, (req, res) => {
   const { name, description } = req.body || {};
   if (!name) return res.status(400).json({ error: 'Room name required' });
   const clean = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
   if (!clean) return res.status(400).json({ error: 'Invalid room name' });
-
   db = dbRead();
   if (db.rooms.find(r => r.id === clean)) return res.status(400).json({ error: 'Room already exists' });
-
   const room = { id: clean, name: clean, description: (description || '').slice(0, 100), createdBy: req.user.id, createdAt: Date.now() };
   db.rooms.push(room);
   dbWrite(db);
-
   broadcast({ type: 'room_created', room });
   res.json(room);
 });
-
 app.delete('/api/rooms/:roomId', authMiddleware, (req, res) => {
   db = dbRead();
   const user = db.users.find(u => u.id === req.user.id);
   if (!user?.isOwner) return res.status(403).json({ error: 'Owner only' });
-
   const PROTECTED = ['general', 'random', 'gaming', 'music'];
   if (PROTECTED.includes(req.params.roomId)) return res.status(400).json({ error: 'Cannot delete default channels' });
-
   db.rooms = db.rooms.filter(r => r.id !== req.params.roomId);
   db.messages = db.messages.filter(m => m.roomId !== req.params.roomId);
   dbWrite(db);
-
   broadcast({ type: 'room_deleted', roomId: req.params.roomId });
   res.json({ ok: true });
 });
 
-// ── Message Routes ──────────────────────────────────────────────────────────
+// ── Message Routes ─────────────────────────────────────────────────────────
 app.get('/api/messages/:roomId', authMiddleware, (req, res) => {
   const { before, limit = 50 } = req.query;
   db = dbRead();
@@ -276,7 +247,7 @@ app.get('/api/messages/:roomId', authMiddleware, (req, res) => {
   res.json(hydrateMessages(msgs));
 });
 
-// ── DM Routes ───────────────────────────────────────────────────────────────
+// ── DM Routes ──────────────────────────────────────────────────────────────
 app.get('/api/dm/:userId', authMiddleware, (req, res) => {
   db = dbRead();
   const dmKey = [req.user.id, req.params.userId].sort().join(':');
@@ -284,7 +255,7 @@ app.get('/api/dm/:userId', authMiddleware, (req, res) => {
   res.json(hydrateMessages(msgs));
 });
 
-// ── Search ──────────────────────────────────────────────────────────────────
+// ── Search ─────────────────────────────────────────────────────────────────
 app.get('/api/search', authMiddleware, (req, res) => {
   const { q, roomId } = req.query;
   if (!q || q.trim().length < 2) return res.status(400).json({ error: 'Query too short' });
@@ -295,7 +266,7 @@ app.get('/api/search', authMiddleware, (req, res) => {
   res.json(hydrateMessages(msgs.slice(-30)));
 });
 
-// ── Pin Routes ──────────────────────────────────────────────────────────────
+// ── Pin Routes ─────────────────────────────────────────────────────────────
 app.post('/api/messages/:msgId/pin', authMiddleware, (req, res) => {
   db = dbRead();
   const msg = db.messages.find(m => m.id === req.params.msgId);
@@ -305,18 +276,15 @@ app.post('/api/messages/:msgId/pin', authMiddleware, (req, res) => {
   broadcast({ type: 'message_pinned', messageId: msg.id, pinned: msg.pinned, roomId: msg.roomId });
   res.json({ ok: true, pinned: msg.pinned });
 });
-
 app.get('/api/rooms/:roomId/pins', authMiddleware, (req, res) => {
   db = dbRead();
   const pins = db.messages.filter(m => m.roomId === req.params.roomId && m.pinned);
   res.json(hydrateMessages(pins));
 });
 
-// ── Serve Frontend ──────────────────────────────────────────────────────────
+// ── Serve Frontend ─────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
-
 app.get('*', (req, res) => {
-  // Only serve index.html for non-API routes (API 404s should be JSON)
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -328,17 +296,16 @@ app.get('*', (req, res) => {
   }
 });
 
-// ── Global error handler (always returns JSON) ─────────────────────────────
+// ── Global error handler ───────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// ── HTTP + WebSocket Server ─────────────────────────────────────────────────
+// ── HTTP + WebSocket Server ────────────────────────────────────────────────
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
-
-const clients = new Map(); // ws → { userId, username, isOwner }
+const clients = new Map();
 
 function broadcast(data, excludeWs = null) {
   const msg = JSON.stringify(data);
@@ -348,7 +315,6 @@ function broadcast(data, excludeWs = null) {
     }
   }
 }
-
 function sendTo(userId, data) {
   const msg = JSON.stringify(data);
   for (const [ws, info] of clients) {
@@ -364,27 +330,20 @@ wss.on('connection', (ws) => {
 
   ws.on('message', async (rawData) => {
     let data;
-    try {
-      data = JSON.parse(rawData.toString());
-    } catch {
-      return; // silently ignore non-JSON frames
-    }
+    try { data = JSON.parse(rawData.toString()); }
+    catch { return; }
 
     const clientInfo = clients.get(ws);
 
     switch (data.type) {
-
       case 'auth': {
         try {
           const payload = jwt.verify(data.token, JWT_SECRET);
           clients.set(ws, { userId: payload.id, username: payload.username, isOwner: payload.isOwner });
-
           db = dbRead();
           const user = db.users.find(u => u.id === payload.id);
           if (user) { user.status = 'online'; dbWrite(db); }
-
           broadcast({ type: 'user_online', userId: payload.id, username: payload.username }, ws);
-
           const onlineIds = [...new Set([...clients.values()].map(c => c.userId))];
           ws.send(JSON.stringify({ type: 'online_users', userIds: onlineIds }));
           ws.send(JSON.stringify({ type: 'auth_ok' }));
@@ -394,18 +353,15 @@ wss.on('connection', (ws) => {
         }
         break;
       }
-
       case 'message': {
         if (!clientInfo) return;
         const { roomId, text, replyTo } = data;
         if (!text?.trim() || !roomId) return;
-
         db = dbRead();
         const room = db.rooms.find(r => r.id === roomId);
         if (!room) return;
         const user = db.users.find(u => u.id === clientInfo.userId);
         if (!user) return;
-
         const msg = {
           id: uuidv4(),
           roomId,
@@ -417,10 +373,8 @@ wss.on('connection', (ws) => {
           pinned: false,
           createdAt: Date.now()
         };
-
         db.messages.push(msg);
         dbWrite(db);
-
         const fullMsg = { ...msg, user: sanitizeUser(user) };
         if (replyTo) {
           const parent = db.messages.find(m => m.id === replyTo);
@@ -432,7 +386,6 @@ wss.on('connection', (ws) => {
         broadcast({ type: 'message', message: fullMsg });
         break;
       }
-
       case 'edit_message': {
         if (!clientInfo) return;
         db = dbRead();
@@ -446,7 +399,6 @@ wss.on('connection', (ws) => {
         broadcast({ type: 'message_edited', messageId: msg.id, text: msg.text, editedAt: msg.editedAt });
         break;
       }
-
       case 'delete_message': {
         if (!clientInfo) return;
         db = dbRead();
@@ -458,17 +410,14 @@ wss.on('connection', (ws) => {
         broadcast({ type: 'message_deleted', messageId: data.messageId });
         break;
       }
-
       case 'dm': {
         if (!clientInfo) return;
         const { toUserId, text, replyTo } = data;
         if (!text?.trim() || !toUserId) return;
-
         db = dbRead();
         const user = db.users.find(u => u.id === clientInfo.userId);
         const toUser = db.users.find(u => u.id === toUserId);
         if (!user || !toUser) return;
-
         const dmKey = [user.id, toUserId].sort().join(':');
         const msg = {
           id: uuidv4(),
@@ -481,10 +430,8 @@ wss.on('connection', (ws) => {
           edited: false,
           createdAt: Date.now()
         };
-
         db.messages.push(msg);
         dbWrite(db);
-
         const fullMsg = { ...msg, user: sanitizeUser(user) };
         sendTo(user.id, { type: 'dm', message: fullMsg });
         if (toUserId !== user.id) {
@@ -492,7 +439,6 @@ wss.on('connection', (ws) => {
         }
         break;
       }
-
       case 'typing': {
         if (!clientInfo) return;
         broadcast({
@@ -505,7 +451,6 @@ wss.on('connection', (ws) => {
         }, ws);
         break;
       }
-
       case 'reaction': {
         if (!clientInfo) return;
         if (!data.emoji || !data.messageId) return;
@@ -522,15 +467,12 @@ wss.on('connection', (ws) => {
         broadcast({ type: 'reaction_update', messageId: data.messageId, reactions: msg.reactions });
         break;
       }
-
       case 'read_receipt': {
         if (!clientInfo) return;
         broadcast({ type: 'read_receipt', userId: clientInfo.userId, roomId: data.roomId, timestamp: Date.now() }, ws);
         break;
       }
-
-      default:
-        break;
+      default: break;
     }
   });
 
@@ -538,7 +480,6 @@ wss.on('connection', (ws) => {
     const info = clients.get(ws);
     if (info) {
       clients.delete(ws);
-      // Only mark offline if no other tabs/connections for same user
       const stillOnline = [...clients.values()].some(c => c.userId === info.userId);
       if (!stillOnline) {
         db = dbRead();
@@ -549,9 +490,7 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('error', (err) => {
-    console.error('WebSocket error:', err.message);
-  });
+  ws.on('error', (err) => console.error('WebSocket error:', err.message));
 });
 
 // Keep-alive ping every 30s
@@ -562,7 +501,6 @@ const heartbeat = setInterval(() => {
     ws.ping();
   });
 }, 30000);
-
 wss.on('close', () => clearInterval(heartbeat));
 
 server.listen(PORT, () => {
